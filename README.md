@@ -241,7 +241,7 @@ sam deploy --guided
 | 역할 | 담당 |
 |------|------|
 | 프론트엔드 + 백엔드 인프라 | [@HyoGyungKim](https://github.com) |
-| AI / Bedrock RAG | [@HyoGyungKim], [@chglee76] |
+| AI / Bedrock RAG | [@HyoGyungKim](https://github.com), [@chglee76](https://github.com) |
 
 </div>
 
