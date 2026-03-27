@@ -1,0 +1,34 @@
+@import "tailwindcss";
+
+@theme {
+  --color-main: #A8D672;
+  --color-main-dark: #8BBF4F;
+  --color-main-light: #D4ECBA;
+  --color-blue: #A8D4F5;
+  --color-blue-dark: #7BB8E0;
+  --color-blue-light: #EBF5FD;
+  --color-soft-red: #E57373;
+  --color-bg: #F5F5F5;
+  --color-card: #FFFFFF;
+  --color-title: #1A1A1A;
+  --color-sub: #8A8A8A;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background-color: var(--color-bg);
+  color: var(--color-title);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 모바일 우선 컨테이너 */
+.app-container {
+  max-width: 390px;
+  margin: 0 auto;
+  min-height: 100dvh;
+  background-color: var(--color-bg);
+  position: relative;
+  padding-bottom: 72px;
+  overflow-wrap: break-word;
+  word-break: keep-all;
+}

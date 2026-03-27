@@ -1,0 +1,462 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Digital Fatigue Management App
+
+Globals:
+  Function:
+    Runtime: nodejs18.x
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        USERS_TABLE: !Ref UsersTable
+        SYMPTOM_LOGS_TABLE: !Ref SymptomLogsTable
+        SCREEN_TIME_TABLE: !Ref ScreenTimeTable
+        WEEKLY_ANALYSIS_TABLE: !Ref WeeklyAnalysisTable
+        RANKINGS_TABLE: !Ref RankingsTable
+        CHAT_HISTORY_TABLE: !Ref ChatHistoryTable
+        KB_ID: '4R6FWY8UTF'
+        USER_POOL_ID: !Ref UserPool
+        USER_POOL_CLIENT_ID: !Ref UserPoolClient
+        REGION: us-east-1
+
+Resources:
+
+  # ============================================
+  # CDN + Static Hosting (React PWA)
+  # ============================================
+  StaticAssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub digital-fatigue-app-${AWS::AccountId}
+
+  StaticAssetsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StaticAssetsBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${StaticAssetsBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub digital-fatigue-oac-${AWS::AccountId}
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt StaticAssetsBucket.RegionalDomainName
+            OriginAccessControlId: !Ref CloudFrontOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+          - Id: ApiOrigin
+            DomainName: !Sub ${RestApi}.execute-api.${AWS::Region}.amazonaws.com
+            OriginPath: /prod
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          ForwardedValues:
+            QueryString: false
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: ApiOrigin
+            ViewerProtocolPolicy: https-only
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            ForwardedValues:
+              QueryString: true
+              Headers: [Authorization]
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+  # ============================================
+  # Authentication (Cognito)
+  # ============================================
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: digital-fatigue-user-pool
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: digital-fatigue-app-client
+      UserPoolId: !Ref UserPool
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  # ============================================
+  # API Gateway (REST API + Cognito Auth)
+  # ============================================
+  RestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+
+  # ============================================
+  # Lambda Functions (8개)
+  # ============================================
+  PreSignupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: pre-signup-fn
+      Handler: src/handlers/preSignup.handler
+      Runtime: nodejs18.x
+      Timeout: 5
+      MemorySize: 128
+
+  PreSignupPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PreSignupFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !Sub arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*
+
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: auth-fn
+      Handler: src/handlers/auth.handler
+      Events:
+        Signup:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /api/auth/signup
+            Method: POST
+            Auth:
+              Authorizer: NONE
+        Login:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /api/auth/login
+            Method: POST
+            Auth:
+              Authorizer: NONE
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+
+  SymptomFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: symptom-fn
+      Handler: src/handlers/symptom.handler
+      Events:
+        CreateSymptom:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /api/symptoms
+            Method: POST
+        GetSymptoms:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /api/symptoms
+            Method: GET
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SymptomLogsTable
+
+  SupplementInfoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: supplement-info-fn
+      Handler: src/handlers/supplementInfo.handler
+      Timeout: 60
+      MemorySize: 512
+      Events:
+        GetSupplementInfo:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /api/supplement-info
+            Method: GET
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:Retrieve
+                - bedrock:InvokeModel
+              Resource: '*'
+        - DynamoDBReadPolicy:
+            TableName: !Ref WeeklyAnalysisTable
+
+  ScreenTimeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: screentime-fn
+      Handler: src/handlers/screentime.handler
+      Events:
+        RecordScreenTime:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /api/screen-time
+            Method: POST
+        GetScreenTime:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /api/screen-time
+            Method: GET
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScreenTimeTable
+
+  AnalysisFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: analysis-fn
+      Handler: src/handlers/analysis.handler
+      Events:
+        GetWeeklyAnalysis:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /api/analysis/weekly
+            Method: GET
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SymptomLogsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScreenTimeTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WeeklyAnalysisTable
+
+  RankingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ranking-fn
+      Handler: src/handlers/ranking.handler
+      Events:
+        GetRanking:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /api/analysis/ranking
+            Method: GET
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RankingsTable
+
+  WeeklyScheduleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: weekly-schedule-fn
+      Handler: src/handlers/weeklySchedule.handler
+      Timeout: 120
+      Events:
+        WeeklyTrigger:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 0 ? * MON *)
+            Description: 매주 월요일 오전 9시 KST (UTC 0시) 주간 분석 집계
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SymptomLogsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScreenTimeTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WeeklyAnalysisTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RankingsTable
+
+  ChatFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: chat-fn
+      Handler: src/handlers/chat.handler
+      Timeout: 60
+      MemorySize: 512
+      Events:
+        PostChat:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /api/chat
+            Method: POST
+        GetChatHistory:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /api/chat/history
+            Method: GET
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ChatHistoryTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:Retrieve
+                - bedrock:InvokeModel
+                - aws-marketplace:ViewSubscriptions
+                - aws-marketplace:Subscribe
+              Resource: '*'
+
+  # ============================================
+  # S3 Bucket for Supplement Data
+  # ============================================
+  SupplementDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub supplement-data-${AWS::AccountId}
+
+  # ============================================
+  # DynamoDB Tables (6개)
+  # ============================================
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Users
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+
+  SymptomLogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: SymptomLogs
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+  ScreenTimeTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ScreenTime
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+  WeeklyAnalysisTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: WeeklyAnalysis
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+  RankingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Rankings
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+  ChatHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ChatHistory
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+# ============================================
+# Outputs
+# ============================================
+Outputs:
+  CloudFrontURL:
+    Description: CloudFront Distribution URL
+    Value: !GetAtt CloudFrontDistribution.DomainName
+  ApiEndpoint:
+    Description: API Gateway endpoint
+    Value: !Sub https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient
+  SupplementDataBucketName:
+    Description: S3 Bucket for supplement data
+    Value: !Ref SupplementDataBucket

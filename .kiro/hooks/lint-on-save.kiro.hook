@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "Lambda Lint on Save",
+  "description": "src/handlers/ 디렉토리의 JS 파일이 저장되면 자동으로 ESLint를 실행합니다.",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "src/handlers/*.js"
+    ]
+  },
+  "then": {
+    "type": "runCommand",
+    "command": "npx eslint --no-error-on-unmatched-pattern src/handlers/"
+  }
+}

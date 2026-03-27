@@ -1,0 +1,346 @@
+# Implementation Plan: Digital Fatigue Management
+
+## Overview
+
+디지털 피로 관리 앱의 구현 계획이다. SAM 인프라 업데이트 → 백엔드 Lambda 함수 구현 → 프론트엔드 PWA 구현 → 더미 데이터 시드 → 통합 순서로 진행한다. 각 단계는 이전 단계 위에 점진적으로 빌드되며, 테스트로 핵심 기능을 조기 검증한다.
+
+## Tasks
+
+- [x] 1. SAM template.yaml 업데이트 및 프로젝트 구조 설정
+  - [x] 1.1 template.yaml에 ChatHistoryTable DynamoDB 테이블 및 KB_ID 환경변수 추가
+    - PK(String) + SK(String), BillingMode: PAY_PER_REQUEST
+    - Globals.Function.Environment.Variables에 `CHAT_HISTORY_TABLE: !Ref ChatHistoryTable` 추가
+    - Globals.Function.Environment.Variables에 `KB_ID: !Ref SupplementKnowledgeBase` 추가 (SupplementInfoFunction, ChatFunction이 Bedrock KB 접근 시 사용)
+    - _Requirements: 10.2, 17.5, 19.2, 19.4, 19.8_
+  - [x] 1.2 template.yaml에 ChatFunction Lambda 추가
+    - Handler: `src/handlers/chat.handler`, Timeout: 60, MemorySize: 512
+    - Events: POST /api/chat (Cognito Auth), GET /api/chat/history (Cognito Auth)
+    - Policies: DynamoDBCrudPolicy(ChatHistoryTable), DynamoDBReadPolicy(UsersTable), Bedrock Retrieve/InvokeModel
+    - _Requirements: 19.1, 19.2, 19.3, 19.5, 19.8_
+  - [x] 1.3 프로젝트 디렉토리 구조 및 공통 유틸리티 설정
+    - `src/handlers/`, `src/utils/`, `tests/unit/handlers/`, `tests/property/` 디렉토리 생성
+    - `src/utils/response.js` — 표준 API 응답 헬퍼 함수 (`{ statusCode, body: JSON.stringify({}) }`)
+    - `src/utils/auth.js` — JWT 토큰에서 이메일 추출 유틸리티
+    - `src/utils/validation.js` — 공통 입력 검증 함수
+    - package.json에 jest, fast-check 의존성 추가
+    - _Requirements: 17.1, 17.2, 17.3, 17.4, 17.5_
+
+- [x] 2. AuthFunction Lambda 구현 (회원가입/로그인)
+  - [x] 2.1 `src/handlers/auth.handler` 구현
+    - POST /api/auth/signup: 이메일 형식 검증, 나이(양의 정수) 검증, 성별(male/female/other) 검증
+    - Cognito signUp 호출 후 UsersTable에 사용자 정보(PK: `USER#<email>`, email, age, gender, createdAt) 저장
+    - 중복 이메일 → UsernameExistsException 처리 → 409
+    - POST /api/auth/login: Cognito initiateAuth(SRP) 호출 → AccessToken, IdToken, RefreshToken 반환
+    - 인증 실패 → 401
+    - try/catch 에러 핸들링, 로그에 민감 데이터 마스킹
+    - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.2, 2.3, 17.1, 17.2, 17.3, 17.4_
+  - [x]* 2.2 Property 테스트: 유효한 회원가입 입력은 항상 성공한다
+    - **Property 1: 유효한 회원가입 입력은 항상 성공한다**
+    - fast-check로 유효한 이메일, 비밀번호, 나이(양의 정수), 성별(male/female/other) 조합 생성 → statusCode 200 확인
+    - Cognito 모킹 필수
+    - **Validates: Requirements 1.1**
+  - [x]* 2.3 Property 테스트: 유효하지 않은 회원가입 입력은 항상 거부된다
+    - **Property 2: 유효하지 않은 회원가입 입력은 항상 거부된다**
+    - fast-check로 유효하지 않은 이메일/나이/성별 조합 생성 → statusCode 400 확인, 데이터 미저장 확인
+    - **Validates: Requirements 1.3, 1.4, 1.5**
+  - [x]* 2.4 단위 테스트: AuthFunction
+    - `tests/unit/handlers/auth.test.js`
+    - 중복 이메일 가입 → 409, 로그인 실패 → 401, 성공 케이스, 에지 케이스
+    - _Requirements: 1.2, 2.2_
+
+- [x] 3. SymptomFunction Lambda 구현 (증상 기록)
+  - [x] 3.1 `src/handlers/symptom.handler` 구현
+    - POST /api/symptoms: eyeFatigue, headache, generalFatigue 각 1~5 정수 검증
+    - 필수 항목 누락 시 누락된 항목 명시한 400 응답
+    - JWT에서 이메일 추출 → PK: `USER#<email>`, SK: `LOG#<timestamp>` 형식으로 SymptomLogsTable에 저장
+    - GET /api/symptoms: 사용자 증상 기록을 SK 역순(시간 역순)으로 조회, 결과 없으면 빈 배열 반환
+    - _Requirements: 4.1, 4.2, 4.3, 5.1, 5.2, 17.1, 17.2, 17.3, 17.4_
+  - [x]* 3.2 Property 테스트: 유효한 증상 점수는 항상 저장된다
+    - **Property 3: 유효한 증상 점수는 항상 저장된다**
+    - fast-check로 1~5 범위 정수 3개 조합 생성 → statusCode 200 및 DynamoDB 저장 확인
+    - **Validates: Requirements 4.1**
+  - [x]* 3.3 Property 테스트: 유효하지 않은 증상 입력은 항상 거부된다
+    - **Property 4: 유효하지 않은 증상 입력은 항상 거부된다**
+    - fast-check로 범위 밖 점수, 비정수, 누락 항목 생성 → statusCode 400 확인, 데이터 미저장 확인
+    - **Validates: Requirements 4.2, 4.3**
+  - [x]* 3.4 Property 테스트: 증상 기록은 항상 시간 역순으로 조회된다
+    - **Property 5: 증상 기록은 항상 시간 역순으로 조회된다**
+    - fast-check로 랜덤 증상 기록 다수 저장 후 조회 → createdAt 기준 시간 역순 정렬 확인
+    - **Validates: Requirements 5.1**
+  - [x]* 3.5 단위 테스트: SymptomFunction
+    - `tests/unit/handlers/symptom.test.js`
+    - 빈 조회 결과 → 빈 배열, 검증 실패 케이스, 성공 케이스
+    - _Requirements: 4.2, 4.3, 5.2_
+
+- [x] 4. ScreenTimeFunction Lambda 구현 (스크린타임)
+  - [x] 4.1 `src/handlers/screentime.handler` 구현
+    - POST /api/screen-time: startTime, endTime (ISO 8601) 검증, startTime < endTime 검증
+    - 필수 필드 누락 시 누락된 필드 명시한 400 응답
+    - durationMinutes 자동 계산, PK: `USER#<email>`, SK: `SESSION#<timestamp>` 형식으로 ScreenTimeTable에 저장
+    - GET /api/screen-time: 사용자 스크린타임 기록을 SK 역순(시간 역순)으로 조회, 결과 없으면 빈 배열 반환
+    - _Requirements: 6.1, 6.2, 6.3, 7.1, 7.2, 17.1, 17.2, 17.3, 17.4_
+  - [x]* 4.2 Property 테스트: 유효한 스크린타임 세션은 항상 저장된다
+    - **Property 6: 유효한 스크린타임 세션은 항상 저장된다**
+    - fast-check로 startTime < endTime인 ISO 8601 시간 쌍 생성 → statusCode 200 및 저장 확인
+    - **Validates: Requirements 6.1**
+  - [x]* 4.3 Property 테스트: 유효하지 않은 스크린타임 입력은 항상 거부된다
+    - **Property 7: 유효하지 않은 스크린타임 입력은 항상 거부된다**
+    - fast-check로 startTime >= endTime 또는 필수 필드 누락 생성 → statusCode 400 확인, 데이터 미저장 확인
+    - **Validates: Requirements 6.2, 6.3**
+  - [x]* 4.4 Property 테스트: 스크린타임 기록은 항상 시간 역순으로 조회된다
+    - **Property 8: 스크린타임 기록은 항상 시간 역순으로 조회된다**
+    - fast-check로 랜덤 스크린타임 기록 다수 저장 후 조회 → createdAt 기준 시간 역순 정렬 확인
+    - **Validates: Requirements 7.1**
+  - [x]* 4.5 단위 테스트: ScreenTimeFunction
+    - `tests/unit/handlers/screentime.test.js`
+    - 시간 범위 오류, 필드 누락, 빈 조회 결과, 성공 케이스
+    - _Requirements: 6.2, 6.3, 7.2_
+
+- [x] 5. Checkpoint - 핵심 CRUD Lambda 검증
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 6. WeeklyScheduleFunction Lambda 구현 (주간 자동 집계)
+  - [x] 6.1 `src/handlers/weeklySchedule.handler` 구현
+    - EventBridge cron 트리거로 실행 (매주 월요일 UTC 0시)
+    - 전주(월~일) 기간의 모든 사용자 증상 기록을 SymptomLogsTable에서 집계
+    - 전주(월~일) 기간의 모든 사용자 스크린타임 기록을 ScreenTimeTable에서 집계
+    - Weekly_Health_Score 계산 공식 구현:
+      - `symptomAvg = (avgEyeFatigue + avgHeadache + avgGeneralFatigue) / 3`
+      - `symptomScore = (1 - (symptomAvg - 1) / 4) * 60`
+      - `screenTimeScore = max(0, 40 - (totalScreenTimeMinutes / 7 / 60) * 10)`
+      - `weeklyHealthScore = round(symptomScore + screenTimeScore)`
+    - WeeklyAnalysisTable에 PK: `USER#<email>`, SK: `WEEK#<YYYY-Www>` 형식으로 저장
+    - 전체 사용자 순위 산출 → RankingsTable에 PK: `WEEK#<YYYY-Www>`, SK: `RANK#<zero-padded>#<email>` 형식으로 갱신
+    - _Requirements: 12.1, 12.2, 12.3, 12.4, 12.5_
+  - [x]* 6.2 Property 테스트: Weekly_Health_Score는 올바르게 계산된다
+    - **Property 9: Weekly_Health_Score는 증상과 스크린타임을 모두 반영하여 올바르게 계산된다**
+    - fast-check로 랜덤 증상(1~5) 배열과 스크린타임(분) 배열 생성 → 점수 0~100 범위 및 공식 정확성 확인
+    - **Validates: Requirements 8.3, 12.2, 12.3, 12.4**
+  - [x]* 6.3 Property 테스트: 순위는 점수 기반으로 올바르게 산출된다
+    - **Property 11: 주간 집계 후 순위는 점수 기반으로 올바르게 산출된다**
+    - fast-check로 랜덤 사용자 점수 집합 생성 → 높은 점수가 낮은 순위 번호를 가지는지 확인
+    - **Validates: Requirements 12.5**
+  - [x]* 6.4 단위 테스트: WeeklyScheduleFunction
+    - `tests/unit/handlers/weeklySchedule.test.js`
+    - 데이터 없는 사용자 처리, 집계 정확성, DynamoDB 모킹
+    - _Requirements: 12.2, 12.3, 12.4, 12.5_
+
+- [x] 7. AnalysisFunction 및 RankingFunction Lambda 구현
+  - [x] 7.1 `src/handlers/analysis.handler` 구현
+    - GET /api/analysis/weekly: JWT에서 이메일 추출 → WeeklyAnalysisTable에서 최근 주간 건강 점수 조회
+    - 데이터 없음 시 안내 메시지와 함께 statusCode 200 반환
+    - _Requirements: 8.1, 8.2, 8.3_
+  - [x] 7.2 `src/handlers/ranking.handler` 구현
+    - GET /api/analysis/ranking: RankingsTable에서 전체 사용자 순위 목록을 순위 오름차순으로 조회
+    - 인증된 사용자의 순위 정보를 응답에 별도 표시 (myRank)
+    - 더미 유저 50명 데이터 포함
+    - _Requirements: 9.1, 9.2, 9.3_
+  - [x]* 7.3 Property 테스트: 순위는 항상 오름차순으로 정렬된다
+    - **Property 10: 순위는 항상 오름차순으로 정렬된다**
+    - fast-check로 랜덤 순위 데이터 생성 후 조회 → rank 값 기준 오름차순 정렬 확인
+    - **Validates: Requirements 9.1**
+  - [x]* 7.4 단위 테스트: AnalysisFunction 및 RankingFunction
+    - `tests/unit/handlers/analysis.test.js`, `tests/unit/handlers/ranking.test.js`
+    - 데이터 없음 → 안내 메시지, 순위 조회 성공, myRank 표시
+    - _Requirements: 8.2, 9.3_
+
+- [x] 8. SupplementInfoFunction Lambda 구현 (RAG 영양제 추천)
+  - [x] 8.1 `src/handlers/supplementInfo.handler` 구현
+    - GET /api/supplement-info: JWT에서 이메일 추출 → WeeklyAnalysisTable에서 최근 Weekly_Health_Score 조회
+    - 점수 없음 시 statusCode 404 반환
+    - 점수 기반으로 Bedrock Knowledge Base retrieve 호출 → 관련 NIH 영양소/디지털 피로 해결책 문서 검색
+    - 검색된 문서 + 사용자 점수를 Claude Sonnet에 전달 → 맞춤 영양제 추천 텍스트 생성
+    - Bedrock/Claude 실패 시 statusCode 500 반환
+    - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5, 10.6_
+  - [x]* 8.2 단위 테스트: SupplementInfoFunction
+    - `tests/unit/handlers/supplementInfo.test.js`
+    - 점수 없음 → 404, Bedrock 실패 → 500, 성공 케이스 (Bedrock 모킹)
+    - _Requirements: 10.5, 10.6_
+
+- [x] 9. ChatFunction Lambda 구현 (RAG 챗봇)
+  - [x] 9.1 `src/handlers/chat.handler` 구현
+    - POST /api/chat: 빈 메시지 검증 → 400
+    - JWT에서 이메일 추출 → UsersTable에서 프로필(나이, 성별) 조회
+    - ChatHistoryTable에서 최근 5개 대화 이력 조회 (SK 역순)
+    - 메시지 + 프로필 + 대화 컨텍스트로 Knowledge Base retrieve 호출
+    - 검색된 문서 + 메시지 + 프로필 + 대화 컨텍스트를 Claude Sonnet에 전달 → 맞춤형 해결책 생성
+    - 사용자 메시지와 챗봇 응답을 ChatHistoryTable에 PK: `USER#<email>`, SK: `CHAT#<timestamp>` 형식으로 저장
+    - GET /api/chat/history: 사용자 대화 이력을 시간순으로 조회, 결과 없으면 빈 배열 반환
+    - Bedrock/Claude 실패 시 statusCode 500 반환
+    - _Requirements: 19.1, 19.2, 19.3, 19.4, 19.5, 19.6, 19.7, 19.8, 19.9_
+  - [x]* 9.2 Property 테스트: 챗봇 대화 저장 및 조회 round-trip
+    - **Property 13: 챗봇 대화 저장 및 조회 round-trip**
+    - fast-check로 랜덤 메시지/응답 쌍 생성 → ChatHistoryTable 저장 후 조회 → 동일 데이터 및 시간순 정렬 확인
+    - **Validates: Requirements 19.4, 19.8**
+  - [x]* 9.3 Property 테스트: 빈 챗봇 메시지는 항상 거부된다
+    - **Property 14: 빈 챗봇 메시지는 항상 거부된다**
+    - fast-check로 빈 문자열/공백 문자열 생성 → statusCode 400 확인, ChatHistoryTable 미저장 확인
+    - **Validates: Requirements 19.6**
+  - [x]* 9.4 단위 테스트: ChatFunction
+    - `tests/unit/handlers/chat.test.js`
+    - 빈 메시지 → 400, Bedrock 실패 → 500, 대화 이력 없음 → 빈 배열, 대화 컨텍스트 포함 확인
+    - _Requirements: 19.6, 19.7, 19.9_
+
+- [x] 10. Lambda 공통 응답 형식 Property 테스트
+  - [x]* 10.1 Property 테스트: 모든 Lambda 응답은 표준 형식을 따른다
+    - **Property 12: 모든 Lambda 응답은 표준 형식을 따르며 예외 시 500을 반환한다**
+    - fast-check로 각 Lambda 핸들러에 랜덤 이벤트 전달 → 응답이 항상 `{ statusCode, body }` 형식이며 body가 유효한 JSON인지 확인
+    - 예외 발생 시 statusCode 500 확인
+    - **Validates: Requirements 17.3, 17.4**
+
+- [x] 11. Checkpoint - 백엔드 Lambda 전체 검증
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 12. 프론트엔드 프로젝트 초기화 및 공통 설정
+  - [x] 12.1 React + Vite + Tailwind CSS 프로젝트 설정
+    - Vite React 프로젝트 생성 (frontend/ 디렉토리)
+    - Tailwind CSS 설정 (모바일 우선, max-width: 390px)
+    - vite-plugin-pwa 설치 및 설정
+    - Web App Manifest 작성 (앱 이름, 아이콘, 테마 색상, display: standalone)
+    - _Requirements: 16.1, 16.2_
+  - [x] 12.2 API 클라이언트 및 인증 컨텍스트 설정
+    - `frontend/src/api/client.js` — axios 인스턴스, Authorization 헤더 자동 첨부, 기본 URL 설정
+    - `frontend/src/context/AuthContext.jsx` — Cognito 토큰 관리, 로그인 상태 관리, ProtectedRoute 컴포넌트
+    - `frontend/src/api/endpoints.js` — 각 API 엔드포인트 호출 함수
+    - _Requirements: 3.1, 3.2, 3.3_
+  - [x] 12.3 하단 네비게이션 및 라우팅 설정
+    - React Router 설정: `/`, `/symptoms`, `/analysis`, `/chat`, `/auth`
+    - 하단 탭 네비게이션 컴포넌트 (홈, 증상기록, 분석, 챗봇)
+    - 인증되지 않은 사용자는 `/auth`로 리다이렉트
+    - _Requirements: 20.1_
+
+- [x] 13. 인증 화면 구현 (로그인/회원가입)
+  - [x] 13.1 `/auth` 화면 구현
+    - 로그인 폼: 이메일, 비밀번호 입력 → POST /api/auth/login 호출
+    - 회원가입 폼: 이메일, 비밀번호, 나이, 성별 입력 → POST /api/auth/signup 호출
+    - 로그인/회원가입 탭 전환 UI
+    - 성공 시 토큰 저장 후 홈 화면으로 이동
+    - 실패 시 오류 메시지 표시
+    - 모바일 우선 UI (max-width: 390px)
+    - _Requirements: 1.1, 2.1, 13.4_
+
+- [x] 14. 홈 화면 구현 (타이머 + 스크린타임)
+  - [x] 14.1 홈 화면 UI 및 스크린타임 표시 구현
+    - `/` 경로 홈 화면 컴포넌트
+    - 오늘의 총 스크린타임 표시 (GET /api/screen-time에서 오늘 날짜 필터링)
+    - 20분 휴식 타이머 UI (카운트다운 표시)
+    - 모바일 우선 UI (max-width: 390px)
+    - _Requirements: 13.1, 13.3, 13.4_
+  - [x] 14.2 스크린타임 자동 기록 로직 구현
+    - 앱 포그라운드 진입 시 세션 시작 시간 기록 (visibilitychange 이벤트 또는 focus 이벤트)
+    - 앱 백그라운드 전환 또는 탭 비활성화 시 세션 종료 → POST /api/screen-time 자동 호출
+    - Service Worker의 beforeunload/visibilitychange 이벤트로 브라우저 종료 시에도 세션 기록
+    - navigator.sendBeacon() 사용하여 페이지 언로드 시에도 안정적으로 API 전송
+    - _Requirements: 6.1, 13.3_
+  - [x] 14.3 Service Worker 타이머 로직 구현
+    - Service Worker에서 20분 간격 타이머 관리
+    - `self.registration.showNotification()`으로 백그라운드 휴식 알림 전송
+    - React 컴포넌트와 `postMessage`로 타이머 상태 동기화 (포그라운드)
+    - 알림 클릭 시 `/symptoms` 화면으로 이동
+    - 타이머 간격 기본값 20분
+    - _Requirements: 13.1, 13.2, 16.1_
+  - [x] 14.4 PWA 오프라인 지원 설정
+    - vite-plugin-pwa로 Service Worker 등록 및 정적 자원 캐싱
+    - 오프라인 시 캐시된 정적 자원으로 기본 화면 표시
+    - _Requirements: 16.1, 16.3_
+
+- [x] 15. 증상 기록 화면 구현
+  - [x] 15.1 `/symptoms` 화면 구현
+    - 눈피로, 두통, 전신피로 3개 문항 표시
+    - 각 문항 1~5점 척도 선택 UI (버튼 또는 슬라이더)
+    - 3개 문항 모두 선택 후 제출 → POST /api/symptoms 호출
+    - 성공 시 성공 피드백 표시
+    - 실패 시 오류 메시지 표시
+    - 모바일 우선 UI (max-width: 390px)
+    - _Requirements: 14.1, 14.2, 14.3, 14.4, 14.5_
+
+- [x] 16. 분석 화면 구현
+  - [x] 16.1 `/analysis` 화면 구현
+    - 화면 로드 시 GET /api/analysis/weekly, GET /api/analysis/ranking, GET /api/supplement-info 병렬 호출
+    - 주간 건강 점수(Weekly_Health_Score) 섹션 표시
+    - 전체 사용자 순위 섹션 표시
+    - RAG 기반 영양제 추천 텍스트 섹션 표시
+    - 로딩 중 로딩 인디케이터 표시
+    - 부분 실패 시 실패한 섹션만 오류 표시, 성공한 섹션은 정상 렌더링
+    - 모바일 우선 UI (max-width: 390px)
+    - _Requirements: 15.1, 15.2, 15.3, 15.4, 15.5, 15.6_
+
+- [x] 17. 챗봇 화면 구현
+  - [x] 17.1 `/chat` 화면 구현
+    - 메시지 입력 텍스트 필드와 전송 버튼
+    - 화면 로드 시 GET /api/chat/history 호출 → 기존 대화 이력 표시
+    - 메시지 전송 시 POST /api/chat 호출, 사용자 메시지 즉시 대화 영역에 표시
+    - 챗봇 응답 대기 중 로딩 인디케이터 표시
+    - 응답 수신 시 대화 영역에 표시 및 최신 메시지로 자동 스크롤
+    - API 실패 시 오류 메시지 표시 및 재전송 옵션 제공
+    - 모바일 우선 UI (max-width: 390px)
+    - _Requirements: 20.1, 20.2, 20.3, 20.4, 20.5, 20.6, 20.7, 20.8_
+
+- [x] 18. Checkpoint - 프론트엔드 전체 검증
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 19. 더미 유저 Seed 스크립트 구현
+  - [x] 19.1 `scripts/seed-dummy-users.js` 구현
+    - RankingsTable에 더미 유저 50명의 데이터 삽입
+    - 각 더미 유저: 랜덤 Weekly_Health_Score(0~100), 순위 산출, `isDummy: true`
+    - PK: `WEEK#<YYYY-Www>`, SK: `RANK#<zero-padded rank>#<email>` 형식
+    - package.json에 `"seed": "node scripts/seed-dummy-users.js"` 스크립트 추가
+    - 환경변수로 테이블명 참조, us-east-1 리전
+    - _Requirements: 9.2_
+
+- [x] 20. Knowledge Base 데이터 소스 문서 작성
+  - [x] 20.1 SupplementDataBucket용 텍스트 문서 작성
+    - `data/supplements/lutein.txt` — 루테인 NIH 영양소 정보
+    - `data/supplements/omega3.txt` — 오메가3 NIH 영양소 정보
+    - `data/supplements/vitaminA.txt` — 비타민A NIH 영양소 정보
+    - `data/supplements/vitaminC.txt` — 비타민C NIH 영양소 정보
+    - `data/supplements/zinc.txt` — 아연 NIH 영양소 정보
+    - `data/guides/eye-exercises.txt` — 눈 운동 가이드 (20-20-20 규칙 등)
+    - `data/guides/lifestyle-guide.txt` — 디지털 피로 예방 생활 습관 가이드
+    - _Requirements: 11.1, 11.5_
+  - [ ] 20.2 Bedrock Knowledge Base 사전 생성 (수동 — AWS 콘솔 작업)
+    - AWS 콘솔 → Bedrock → Knowledge Bases → Create knowledge base 수동 진행
+    - 임베딩 모델: Amazon Titan Embeddings v2 (amazon.titan-embed-text-v2:0)
+    - 벡터 스토어: OpenSearch Serverless (콘솔에서 자동 생성 옵션 선택)
+    - 데이터 소스: S3 → SupplementDataBucket 연결
+    - 생성 완료 후 KB_ID, DATA_SOURCE_ID를 확인
+    - template.yaml의 Globals.Function.Environment.Variables에 KB_ID 값 반영
+    - .env 또는 환경변수에 KB_ID, DATA_SOURCE_ID 설정 (deploy-kb.js 스크립트용)
+    - ※ 이 단계는 Kiro가 자동으로 처리할 수 없는 수동 AWS 콘솔 작업임
+    - ※ 이 단계 완료 후 Task 21 (KB 배포 및 동기화) 진행
+    - _Requirements: 11.2, 11.3, 11.4_
+
+- [x] 21. Knowledge Base 배포 및 동기화
+  - [x] 21.1 KB 데이터 S3 업로드 및 Bedrock KB Sync 스크립트 구현
+    - `scripts/deploy-kb.js` 스크립트 작성
+    - data/ 디렉토리의 모든 txt 파일을 SupplementDataBucket(S3)에 업로드 (aws-sdk S3 putObject)
+    - Bedrock Knowledge Base의 DataSource에 대해 startIngestionJob 호출하여 벡터 인덱싱 트리거
+    - Ingestion Job 완료 대기 (getIngestionJob 폴링)
+    - package.json에 `"deploy-kb": "node scripts/deploy-kb.js"` 스크립트 추가
+    - 환경변수: KB_ID, DATA_SOURCE_ID, SUPPLEMENT_BUCKET_NAME, REGION
+    - _Requirements: 11.1, 11.2, 11.3, 11.4_
+
+- [x] 22. 통합 및 최종 연결
+  - [x] 22.1 프론트엔드-백엔드 API 연결 검증
+    - 모든 API 엔드포인트와 프론트엔드 화면 간 연결 확인
+    - Authorization 헤더 자동 첨부 동작 확인
+    - CORS 설정 동작 확인
+    - _Requirements: 3.1, 3.2, 3.3, 3.4_
+  - [x] 22.2 CloudFront 라우팅 설정 확인
+    - 정적 자원 → S3 Origin, /api/* → API Gateway Origin
+    - 기본 루트 객체 index.html 설정
+    - HTTPS 리다이렉트 설정
+    - _Requirements: 18.1, 18.2, 18.3, 18.4_
+
+- [x] 23. Final Checkpoint - 전체 시스템 검증
+  - Ensure all tests pass, ask the user if questions arise.
+
+## Notes
+
+- `*` 표시된 태스크는 선택 사항이며 빠른 MVP를 위해 건너뛸 수 있다
+- 각 태스크는 추적 가능성을 위해 구체적인 요구사항을 참조한다
+- Checkpoint에서 점진적 검증을 수행한다
+- Property 테스트는 fast-check 라이브러리로 보편적 정확성 속성을 검증한다
+- 단위 테스트는 Jest로 특정 예시와 에지 케이스를 검증한다
+- 모든 Lambda는 Node.js 18 + async/await, try/catch 에러 핸들링, 표준 응답 형식을 따른다
+- 로그에 민감 데이터(이메일, 건강 데이터) 마스킹 처리 필수

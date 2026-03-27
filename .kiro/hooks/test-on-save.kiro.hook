@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "Run Tests on Save",
+  "description": "tests/ 디렉토리의 테스트 파일이 저장되면 자동으로 Jest를 실행합니다.",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "tests/**/*.test.js"
+    ]
+  },
+  "then": {
+    "type": "runCommand",
+    "command": "npx jest --passWithNoTests --bail"
+  }
+}

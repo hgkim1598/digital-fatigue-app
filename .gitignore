@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+.aws-sam/
+frontend/dist/
+frontend/dist-ssr/
+
+# Test coverage
+coverage/
+
+# Environment & config
+.env
+.env.*
+*.local
+samconfig.toml
+
+# OS files
+.DS_Store
+*.sw?
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# Lock files (optional - 포함해도 됨)
+# package-lock.json
+# frontend/package-lock.json

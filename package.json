@@ -1,0 +1,25 @@
+{
+  "name": "digital-fatigue-management",
+  "version": "1.0.0",
+  "description": "디지털 피로 관리 앱 - 서버리스 백엔드",
+  "scripts": {
+    "test": "jest --coverage",
+    "test:unit": "jest tests/unit/",
+    "test:property": "jest tests/property/",
+    "seed": "node scripts/seed-all.js",
+    "deploy-kb": "node scripts/deploy-kb.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.600.0",
+    "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@aws-sdk/lib-dynamodb": "^3.600.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.600.0",
+    "@aws-sdk/client-bedrock-agent-runtime": "^3.600.0",
+    "@aws-sdk/client-bedrock-agent": "^3.600.0",
+    "@aws-sdk/client-s3": "^3.600.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "fast-check": "^3.19.0"
+  }
+}
